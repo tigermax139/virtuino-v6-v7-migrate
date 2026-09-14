@@ -1,5 +1,7 @@
 # Virtuino 6 → Virtuino IoT project migrator
 
+![Virtuino 6 dashboard migrating to Virtuino IoT over a Modbus TCP PLC](v6-v7-migration.jpg)
+
 Migrate light-switch dashboards from the legacy **Virtuino 6** Android app
 (`.vrt6` files) to the new cross-platform **Virtuino IoT** app (`.vrt7` files).
 
