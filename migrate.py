@@ -41,9 +41,28 @@ BTN_W, BTN_H = 80, 44   # switch button size
 LBL_COLOR = 4294967295  # white  (Android ARGB as unsigned int)
 NAV_RESERVED = 0        # extra space on top (set >0 if you add nav buttons)
 
+VRT6_SCHEMA = 102             # PRAGMA user_version this tool was built against
+VRT7_SCHEMA = 23
+
 MODBUS_SERVER_TYPE = 300      # vrt7 connection.serverType for Modbus TCP
 COIL_FUNCTION_ID = 0          # vrt7 variable functionID for coils (FC01/05)
 VAR_POOL_SIZE = 500           # vrt7 pre-creates 500 variables per connection
+
+
+def schema_version(path, expected, kind):
+    """Return PRAGMA user_version, warning if it is not the tested one."""
+    try:
+        con = sqlite3.connect(path)
+        ver = con.execute("PRAGMA user_version").fetchone()[0]
+        con.close()
+    except sqlite3.DatabaseError as e:
+        sys.exit(f"{path} is not a readable SQLite database ({e}). "
+                 f"Virtuino project files are SQLite - is this the right file?")
+    if ver != expected:
+        print(f"Warning: {path} has {kind} schema user_version={ver}, "
+              f"this tool was tested with {expected}. Migration may fail.",
+              file=sys.stderr)
+    return ver
 
 
 def dictrows(cur, query, args=()):
@@ -56,14 +75,21 @@ def dictrows(cur, query, args=()):
 # 1. Read the old Virtuino 6 project
 # =====================================================================
 def read_vrt6(path):
+    ver = schema_version(path, VRT6_SCHEMA, "Virtuino 6")
     con = sqlite3.connect(path)
     cur = con.cursor()
 
-    servers = dictrows(cur, "SELECT * FROM servers")
-    panels = dictrows(cur, "SELECT * FROM panel")
-    switches = dictrows(
-        cur,
-        "SELECT * FROM digital_output_component ORDER BY panelID, y, x")
+    try:
+        servers = dictrows(cur, "SELECT * FROM servers")
+        panels = dictrows(cur, "SELECT * FROM panel")
+        switches = dictrows(
+            cur,
+            "SELECT * FROM digital_output_component ORDER BY panelID, y, x")
+    except sqlite3.OperationalError as e:
+        con.close()
+        sys.exit(f"Cannot read {path}: {e}\n"
+                 f"Its schema is user_version={ver} (tested: {VRT6_SCHEMA}). "
+                 f"Please open an issue quoting that number.")
     try:
         texts = dictrows(cur, "SELECT * FROM text")
     except sqlite3.OperationalError:
@@ -93,6 +119,7 @@ def read_vrt6(path):
 # 2. Build the new Virtuino IoT project on top of the template
 # =====================================================================
 def migrate(old, template, out):
+    schema_version(template, VRT7_SCHEMA, "Virtuino IoT")
     shutil.copy(template, out)
     con = sqlite3.connect(out)
     cur = con.cursor()
@@ -112,7 +139,10 @@ def migrate(old, template, out):
         sys.exit("Template needs at least one Button and one Label widget.")
     tbtn, tlbl = tbtn[0], tlbl[0]
 
-    tpanel = dictrows(cur, "SELECT * FROM panel WHERE panelType=100 LIMIT 1")[0]
+    tpanel = dictrows(cur, "SELECT * FROM panel WHERE panelType=100 LIMIT 1")
+    if not tpanel:
+        sys.exit("Template has no normal dashboard (panelType=100).")
+    tpanel = tpanel[0]
 
     var_ddl = cur.execute(
         "SELECT sql FROM sqlite_master WHERE name=?",
@@ -219,9 +249,26 @@ def migrate(old, template, out):
     y_cursor, order = {}, {}
     var_cursor = {}   # per connection: next free variable slot
 
+    skipped = []
     for sw in old["switches"]:
+        # Switches can hang off servers we did not migrate (the Virtuino 6
+        # emulator has an empty ipAddress) or off a panel we never saw.
+        if sw["serverID"] not in conn_map:
+            skipped.append((sw["label"], f"server {sw['serverID']} "
+                                         f"is not a Modbus TCP server"))
+            continue
+        if sw["panelID"] not in panel_map:
+            skipped.append((sw["label"], f"panel {sw['panelID']} not found"))
+            continue
+
         new_conn, unit_uid = conn_map[sw["serverID"]]
         vid = var_cursor.get(new_conn, 0)
+        if vid >= VAR_POOL_SIZE:
+            con.close()
+            sys.exit(f"Connection {new_conn} needs more than {VAR_POOL_SIZE} "
+                     f"variables, which is the pool size Virtuino IoT "
+                     f"pre-creates. Split the project across more "
+                     f"connections and re-run.")
         var_cursor[new_conn] = vid + 1
         vextra = json.dumps({
             "multiInputID": 0, "unitID": unit_uid,
@@ -277,6 +324,10 @@ def migrate(old, template, out):
     print(f"Done: {out}")
     print(f"  connections: {len(conn_map)}  panels: {len(panel_map)}  "
           f"switches: {btn_id}  integrity: {ok}")
+    if skipped:
+        print(f"  skipped {len(skipped)} switch(es):")
+        for label, why in skipped:
+            print(f"    - {label}: {why}")
     print("\nAFTER IMPORT (in the Virtuino IoT app):")
     print("  1. Open every connection and re-type its IP address")
     print("     (IPs are encrypted; the file carries the template's IP).")
