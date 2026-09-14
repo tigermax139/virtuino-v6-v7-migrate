@@ -1,0 +1,4 @@
+# Never commit real projects - they contain your home network layout
+*.vrt6
+*.vrt7
+__pycache__/
